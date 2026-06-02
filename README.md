@@ -1,4 +1,10 @@
-# bist-yol2 - Systematic BIST Portfolio Maintenance Toolkit
+# Ballast - Systematic BIST Portfolio Maintenance Toolkit
+
+[![CI](https://github.com/caganco/ballast-bist/actions/workflows/ci.yml/badge.svg)](https://github.com/caganco/ballast-bist/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)
+![Tests](https://img.shields.io/badge/tests-69%20passing-brightgreen)
+![Typed](https://img.shields.io/badge/mypy-checked-blue)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
 A disciplined, test-covered toolkit for running a long-horizon BIST equity/cash
 portfolio: it computes the initial allocation, generates band-triggered rebalance
