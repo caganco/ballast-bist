@@ -1,0 +1,12 @@
+/data/
+__pycache__/
+*.pyc
+.env
+ballast/portfolio/portfoy_state.json
+.venv/
+venv/
+*.egg-info/
+.DS_Store
+logs/
+.mypy_cache/
+.pytest_cache/

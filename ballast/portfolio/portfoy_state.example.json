@@ -1,0 +1,14 @@
+{
+  "kurulum_tarihi": "2026-06-01",
+  "kurulum_toplam_tl": 300000.0,
+  "zpx30_lot": 1282,
+  "nakit_tl": 37638.70,
+  "hedef_oran": 0.875,
+  "bant": 0.075,
+  "son_rebalance": null,
+  "rebalance_gecmisi": [],
+  "son_kontrol": "2026-06-01",
+  "kontrol_gecmisi": [
+    {"tarih": "2026-06-01", "rebalance_gerekli": false}
+  ]
+}

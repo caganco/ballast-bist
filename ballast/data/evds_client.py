@@ -1,0 +1,289 @@
+"""EVDS (Electronic Data Delivery System) native client.
+
+EVDS is the TCMB data API.
+Auth: API key in 'key' request header (obtained from evds3.tcmb.gov.tr).
+
+URL format (verified by live test 2026-05-26):
+    Base: https://evds3.tcmb.gov.tr/igmevdsms-dis/
+    Query: series=CODE&startDate=DD-MM-YYYY&endDate=DD-MM-YYYY&type=json
+    NOTE: params are appended directly (no '?' prefix, no requests params= dict)
+    The /service/evds/ sub-path returns HTTP 404 for actual data queries.
+
+Usage:
+    from ballast.data.evds_client import fetch_series, fetch_series_df
+    data = fetch_series("TP.APIFON4", "1y")     # list of {date, value}
+    df   = fetch_series_df("TP.APIFON4", "1y")  # pandas DataFrame
+
+Env:
+    EVDS_API_KEY - required. Set in .env or environment.
+"""
+from __future__ import annotations
+
+import logging
+import os
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+import requests
+
+logger = logging.getLogger(__name__)
+
+_BASE_URL = "https://evds3.tcmb.gov.tr/igmevdsms-dis/"  # no /service/evds/
+_DEFAULT_TIMEOUT = 10
+
+_LOOKBACK_WINDOWS: dict[str, int] = {
+    "1m": 31,
+    "3m": 92,
+    "6m": 183,
+    "1y": 365,
+    "2y": 730,
+    "5y": 1825,
+}
+
+
+class EvdsError(RuntimeError):
+    """Raised when EVDS API returns an error or unexpected response."""
+
+
+def fetch_series(
+    series_code: str,
+    lookback: str = "1y",
+    start_date: str | None = None,
+    end_date: str | None = None,
+    api_key: str | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch an EVDS time series.
+
+    Args:
+        series_code: EVDS series code, e.g. "TP.APIFON4" or "TP.TCMB.PFAIZ".
+        lookback: Shorthand window ("1m", "3m", "6m", "1y", "2y", "5y").
+                  Ignored when start_date/end_date are provided.
+        start_date: DD-MM-YYYY format. Overrides lookback.
+        end_date:   DD-MM-YYYY format. Defaults to today.
+        api_key:    EVDS API key. Reads EVDS_API_KEY env var if not given.
+
+    Returns:
+        List of {"date": str (YYYY-MM-DD), "value": float} dicts, newest first.
+
+    Raises:
+        EvdsError: On auth failure, unexpected response format, or empty data.
+        ValueError: When series_code is empty or lookback is invalid.
+    """
+    if not series_code:
+        raise ValueError("series_code must not be empty")
+
+    key = api_key or os.getenv("EVDS_API_KEY")
+    if not key:
+        raise EvdsError(
+            "EVDS_API_KEY not set. Obtain a free key at https://evds3.tcmb.gov.tr/ "
+            "and add it to your .env file."
+        )
+
+    # Build date window
+    if end_date is None:
+        end_date = datetime.now(timezone.utc).strftime("%d-%m-%Y")
+    if start_date is None:
+        days_back = _LOOKBACK_WINDOWS.get(lookback)
+        if days_back is None:
+            raise ValueError(f"Unknown lookback '{lookback}'. Valid: {list(_LOOKBACK_WINDOWS)}")
+        dt_start = datetime.now(timezone.utc) - timedelta(days=days_back)
+        start_date = dt_start.strftime("%d-%m-%Y")
+
+    # params concatenated directly (no '?' prefix) - EVDS rejects ?-query
+    url = (
+        f"{_BASE_URL}series={series_code}"
+        f"&startDate={start_date}&endDate={end_date}&type=json"
+    )
+    logger.debug("EVDS fetch: %s [%s → %s]", series_code, start_date, end_date)
+
+    try:
+        resp = requests.get(url, headers={"key": key}, timeout=_DEFAULT_TIMEOUT)
+    except requests.exceptions.Timeout:
+        raise EvdsError(f"EVDS request timed out (series={series_code})")
+    except requests.exceptions.RequestException as exc:
+        raise EvdsError(f"EVDS network error: {exc}") from exc
+
+    if resp.status_code == 403:
+        raise EvdsError("EVDS API key rejected (HTTP 403). Check EVDS_API_KEY.")
+    if resp.status_code != 200:
+        raise EvdsError(f"EVDS HTTP {resp.status_code} for series={series_code}")
+
+    try:
+        body = resp.json()
+    except ValueError as exc:
+        raise EvdsError(
+            f"EVDS returned non-JSON (HTML SPA?) for series={series_code}"
+        ) from exc
+
+    observations = body.get("items") or body.get("data") or []
+    if not observations:
+        raise EvdsError(f"EVDS returned 0 observations for series={series_code}")
+
+    results: list[dict[str, Any]] = []
+    for obs in observations:
+        date_raw = obs.get("Tarih") or obs.get("tarih") or ""
+        value = _extract_numeric(obs)
+        if value is None or not date_raw:
+            continue
+        # Normalise date to YYYY-MM-DD
+        date_iso = _normalise_date(date_raw)
+        results.append({"date": date_iso, "value": value})
+
+    if not results:
+        raise EvdsError(
+            f"EVDS series {series_code} had observations but no numeric values - "
+            "check the series code"
+        )
+
+    results.sort(key=lambda x: x["date"], reverse=True)
+    logger.info(
+        "EVDS: %s → %d observations (%s … %s)",
+        series_code, len(results), results[-1]["date"], results[0]["date"],
+    )
+    return results
+
+
+def fetch_latest_value(
+    series_code: str,
+    lookback: str = "3m",
+    api_key: str | None = None,
+) -> float:
+    """Return the most recent numeric value for a series.
+
+    Raises EvdsError on any failure.
+    """
+    data = fetch_series(series_code, lookback=lookback, api_key=api_key)
+    return data[0]["value"]
+
+
+def fetch_series_df(
+    series_code: str,
+    lookback: str = "1y",
+    start_date: str | None = None,
+    end_date: str | None = None,
+    api_key: str | None = None,
+):
+    """Same as fetch_series but returns a pandas DataFrame.
+
+    Columns: date (datetime64[ns]), value (float64).
+    Raises ImportError if pandas is not installed.
+    """
+    try:
+        import pandas as pd
+    except ImportError as exc:
+        raise ImportError("pandas required for fetch_series_df") from exc
+
+    data = fetch_series(series_code, lookback, start_date, end_date, api_key)
+    df = pd.DataFrame(data)
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values("date").reset_index(drop=True)
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _extract_numeric(obs: dict) -> float | None:
+    """Extract the first numeric non-metadata field from an EVDS observation."""
+    _SKIP = {"Tarih", "tarih", "UNIXTIME", "YEARWEEK"}
+    for key, val in obs.items():
+        if key in _SKIP:
+            continue
+        if val in (None, "", "ND"):
+            continue
+        try:
+            return float(str(val).replace(",", "."))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _normalise_date(raw: str) -> str:
+    """Convert EVDS date strings to YYYY-MM-DD.
+
+    EVDS formats seen: "2024-01-05", "05-01-2024", "2024", "2024-W01".
+    """
+    raw = raw.strip()
+    # Already ISO
+    if len(raw) == 10 and raw[4] == "-":
+        return raw
+    # DD-MM-YYYY
+    if len(raw) == 10 and raw[2] == "-" and raw[5] == "-":
+        try:
+            return datetime.strptime(raw, "%d-%m-%Y").strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+    # Year only
+    if len(raw) == 4 and raw.isdigit():
+        return f"{raw}-01-01"
+    # ISO week YYYY-WNN
+    if len(raw) == 8 and raw[4] == "-" and raw[5] == "W":
+        try:
+            year, week = int(raw[:4]), int(raw[6:])
+            d = datetime.strptime(f"{year}-W{week:02d}-1", "%G-W%V-%u")
+            return d.strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+    # Fallback: return as-is
+    return raw
+
+
+def _parse_evds_date(raw: str) -> "datetime.date | None":
+    """
+    Parse an EVDS date string to a date object.
+
+    Handles three formats returned by the EVDS API:
+      - "YYYY-MM-DD"  - daily series (e.g. TP.APIFON4)
+      - "YYYY-MM"     - monthly series, zero-padded (e.g. "2025-10")
+      - "YYYY-M"      - monthly series, single-digit month (e.g. "2026-1")
+
+    Returns None on any parse failure.
+    """
+    if not raw:
+        return None
+    raw = raw.strip()
+    # ISO full date: YYYY-MM-DD
+    try:
+        return datetime.fromisoformat(raw).date()
+    except ValueError:
+        pass
+    # Monthly shorthand: YYYY-M or YYYY-MM → treat as 1st of that month
+    parts = raw.split("-")
+    if len(parts) == 2:
+        try:
+            year, month = int(parts[0]), int(parts[1])
+            from datetime import date as _date
+            return _date(year, month, 1)
+        except (ValueError, TypeError):
+            pass
+    return None
+
+
+def is_series_fresh(data: list[dict[str, Any]], stale_days: int) -> bool:
+    """
+    Check if the most recent observation in a fetch_series() result is within stale_days.
+
+    Handles both daily (YYYY-MM-DD) and monthly (YYYY-M / YYYY-MM) EVDS date formats.
+    Freshness gate for monthly EVDS series.
+
+    Args:
+        data: list returned by fetch_series() - each item has "date" (ISO or YYYY-M) + "value"
+        stale_days: maximum acceptable age in calendar days
+
+    Returns:
+        True if last observation is ≤ stale_days old; False if empty, malformed, or stale.
+
+    Examples:
+        >>> # Monthly TÜFE: stale if last obs > 45 days ago
+        >>> is_series_fresh(data, stale_days=45)
+        False  # e.g. last obs "2025-10" = 237 days ago
+    """
+    if not data:
+        return False
+    raw = data[-1].get("date", "")
+    last_date = _parse_evds_date(raw)
+    if last_date is None:
+        return False
+    age = (datetime.now(timezone.utc).date() - last_date).days
+    return age <= stale_days
