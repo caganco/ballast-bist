@@ -172,3 +172,10 @@ python scripts/calib_plots.py           # regenerate results/*.png
 Abdi & Ranaldo (2017), *RFS* 30(12) · Kyle (1985), *Econometrica* 53(6) ·
 Almgren et al. (2005), *Risk* 18(7) · Parkinson (1980) · Garman & Klass (1980) ·
 Rogers & Satchell (1991) · Yang & Zhang (2000), *J. Business*.
+
+## Disclaimer
+
+Independent, non-commercial project with no connection to, sponsorship by, or
+endorsement from Borsa Istanbul A.S. "Borsa Istanbul" and "BIST" are trademarks of
+their respective owner and are used here only descriptively, to identify the market
+this toolkit operates on.
